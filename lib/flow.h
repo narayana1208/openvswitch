@@ -37,7 +37,7 @@ struct pkt_metadata;
 /* This sequence number should be incremented whenever anything involving flows
  * or the wildcarding of flows changes.  This will cause build assertion
  * failures in places which likely need to be updated. */
-#define FLOW_WC_SEQ 25
+#define FLOW_WC_SEQ 26
 
 #define FLOW_N_REGS 8
 BUILD_ASSERT_DECL(FLOW_N_REGS <= NXM_NX_MAX_REGS);
@@ -80,6 +80,11 @@ union flow_in_port {
 /* Maximum number of supported MPLS labels. */
 #define FLOW_MAX_MPLS_LABELS 3
 
+enum base_layer {
+    LAYER_2 = 0,
+    LAYER_3 = 1
+};
+
 /*
  * A flow in the network.
  *
@@ -95,6 +100,10 @@ union flow_in_port {
  * The fields are organized in four segments to facilitate staged lookup, where
  * lower layer fields are first used to determine if the later fields need to
  * be looked at.  This enables better wildcarding for datapath flows.
+ *
+ * The starting layer is specified by 'base_layer'.  When 'base_layer' is
+ * LAYER_3, dl_src, dl_tci, and vlan_tci are not used for matching. The
+ * dl_type field is still used to specify the layer 3 protocol.
  */
 struct flow {
     /* L1 */
@@ -105,6 +114,7 @@ struct flow {
     uint32_t pkt_mark;          /* Packet mark. */
     uint32_t recirc_id;         /* Must be exact match. */
     union flow_in_port in_port; /* Input port.*/
+    uint32_t base_layer;        /* Fields start at this layer */
 
     /* L2 */
     uint8_t dl_src[6];          /* Ethernet source address. */
@@ -142,8 +152,8 @@ BUILD_ASSERT_DECL(sizeof(struct flow) % 4 == 0);
 
 /* Remember to update FLOW_WC_SEQ when changing 'struct flow'. */
 BUILD_ASSERT_DECL(offsetof(struct flow, tp_dst) + 2
-                  == sizeof(struct flow_tnl) + 172
-                  && FLOW_WC_SEQ == 25);
+                  == sizeof(struct flow_tnl) + 176
+                  && FLOW_WC_SEQ == 26);
 
 /* Incremental points at which flow classification may be performed in
  * segments.

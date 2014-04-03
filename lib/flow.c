@@ -50,6 +50,21 @@ const uint8_t flow_segment_u32s[4] = {
     FLOW_U32S
 };
 
+static ovs_be16
+get_l3_eth_type(struct ofpbuf *packet)
+{
+    struct ip_header *ip = ofpbuf_l3(packet);
+    int ip_ver = IP_VER(ip->ip_ihl_ver);
+    switch (ip_ver) {
+    case 4:
+        return htons(ETH_TYPE_IP);
+    case 6:
+        return htons(ETH_TYPE_IPV6);
+    default:
+        return 0;
+    }
+}
+
 static struct arp_eth_header *
 pull_arp(struct ofpbuf *packet)
 {
@@ -337,18 +352,19 @@ invalid:
     return;
 }
 
-/* Initializes 'flow' members from 'packet' and 'md'
+/* Initializes 'flow' members from 'packet' and 'md'.  Expects the
+ * packet->frame pointer to be equal to packet->data, and packet->l3_ofs to be
+ * set to 0 for layer 3 packets.
  *
- * Initializes 'packet' header l2 pointer to the start of the Ethernet
- * header, and the layer offsets as follows:
+ * Initializes the layer offsets as follows:
  *
  *    - packet->l2_5_ofs to the start of the MPLS shim header, or UINT16_MAX
- *      when there is no MPLS shim header.
+ *      when there is no MPLS shim header, or Ethnernet header
  *
- *    - packet->l3_ofs to just past the Ethernet header, or just past the
- *      vlan_header if one is present, to the first byte of the payload of the
- *      Ethernet frame.  UINT16_MAX if the frame is too short to contain an
- *      Ethernet header.
+ *    - packet->l3_ofs (if not 0) to just past the Ethernet header, or just
+ *      past the vlan_header if one is present, to the first byte of the
+ *      payload of the Ethernet frame.  UINT16_MAX if the frame is too short to
+ *      contain an Ethernet header.
  *
  *    - packet->l4_ofs to just past the IPv4 header, if one is present and
  *      has at least the content used for the fields of interest for the flow,
@@ -363,6 +379,8 @@ flow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
 
     COVERAGE_INC(flow_extract);
 
+    ovs_assert(packet->frame == ofpbuf_data(&b));
+
     memset(flow, 0, sizeof *flow);
 
     if (md) {
@@ -374,32 +392,45 @@ flow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
         flow->dp_hash = md->dp_hash;
     }
 
-    ofpbuf_set_frame(packet, ofpbuf_data(packet));
+    if (packet->l3_ofs) {
+        ofpbuf_set_l3(packet, NULL);
+        flow->base_layer = LAYER_2;
 
-    if (ofpbuf_size(&b) < sizeof *eth) {
-        return;
+	if (ofpbuf_size(&b) < sizeof *eth) {
+	    return;
+	}
+
+        /* Link layer. */
+	eth = ofpbuf_data(&b);
+        memcpy(flow->dl_src, eth->eth_src, ETH_ADDR_LEN);
+        memcpy(flow->dl_dst, eth->eth_dst, ETH_ADDR_LEN);
+
+        /* dl_type, vlan_tci. */
+        ofpbuf_pull(&b, ETH_ADDR_LEN * 2);
+        if (eth->eth_type == htons(ETH_TYPE_VLAN)) {
+            parse_vlan(&b, flow);
+        }
+        flow->dl_type = parse_ethertype(&b);
+
+	/* Parse mpls, copy l3 ttl. */
+	if (eth_type_mpls(flow->dl_type)) {
+	    ofpbuf_set_l2_5(packet, ofpbuf_data(&b));
+	    parse_mpls(&b, flow);
+	}
+
+        /* Network layer. */
+        ofpbuf_set_l3(packet, ofpbuf_data(&b));
+    } else {
+        flow->base_layer = LAYER_3;
+
+        if (ofpbuf_size(&b) < IP_HEADER_LEN) {
+            return;
+        }
+
+        /* We assume L3 packets are either IPv4 or IPv6 */
+        flow->dl_type = get_l3_eth_type(packet);
     }
 
-    /* Link layer. */
-    eth = ofpbuf_data(&b);
-    memcpy(flow->dl_src, eth->eth_src, ETH_ADDR_LEN);
-    memcpy(flow->dl_dst, eth->eth_dst, ETH_ADDR_LEN);
-
-    /* dl_type, vlan_tci. */
-    ofpbuf_pull(&b, ETH_ADDR_LEN * 2);
-    if (eth->eth_type == htons(ETH_TYPE_VLAN)) {
-        parse_vlan(&b, flow);
-    }
-    flow->dl_type = parse_ethertype(&b);
-
-    /* Parse mpls, copy l3 ttl. */
-    if (eth_type_mpls(flow->dl_type)) {
-        ofpbuf_set_l2_5(packet, ofpbuf_data(&b));
-        parse_mpls(&b, flow);
-    }
-
-    /* Network layer. */
-    ofpbuf_set_l3(packet, ofpbuf_data(&b));
     if (flow->dl_type == htons(ETH_TYPE_IP)) {
         const struct ip_header *nh = pull_ip(&b);
         if (nh) {
@@ -499,7 +530,7 @@ flow_unwildcard_tp_ports(const struct flow *flow, struct flow_wildcards *wc)
 void
 flow_get_metadata(const struct flow *flow, struct flow_metadata *fmd)
 {
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 25);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 26);
 
     fmd->dp_hash = flow->dp_hash;
     fmd->recirc_id = flow->recirc_id;
@@ -1165,7 +1196,7 @@ flow_push_mpls(struct flow *flow, int n, ovs_be16 mpls_eth_type,
         flow->mpls_lse[0] = set_mpls_lse_values(ttl, tc, 1, htonl(label));
 
         /* Clear all L3 and L4 fields. */
-        BUILD_ASSERT(FLOW_WC_SEQ == 25);
+        BUILD_ASSERT(FLOW_WC_SEQ == 26);
         memset((char *) flow + FLOW_SEGMENT_2_ENDS_AT, 0,
                sizeof(struct flow) - FLOW_SEGMENT_2_ENDS_AT);
     }
