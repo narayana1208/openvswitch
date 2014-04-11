@@ -1283,7 +1283,8 @@ static int validate_and_copy_set_tun(const struct nlattr *attr,
 static int validate_set(const struct nlattr *a,
 			const struct sw_flow_key *flow_key,
 			struct sw_flow_actions **sfa,
-			bool *set_tun)
+			bool *set_tun,
+			bool noeth)
 {
 	const struct nlattr *ovs_key = nla_data(a);
 	int key_type = nla_type(ovs_key);
@@ -1304,7 +1305,11 @@ static int validate_set(const struct nlattr *a,
 
 	case OVS_KEY_ATTR_PRIORITY:
 	case OVS_KEY_ATTR_SKB_MARK:
+		break;
+
 	case OVS_KEY_ATTR_ETHERNET:
+		if (noeth)
+			return -EINVAL;
 		break;
 
 	case OVS_KEY_ATTR_TUNNEL:
@@ -1416,6 +1421,7 @@ int ovs_nla_copy_actions(const struct nlattr *attr,
 {
 	const struct nlattr *a;
 	int rem, err;
+	bool noeth = key->phy.noeth;
 
 	if (depth >= SAMPLE_ACTION_DEPTH)
 		return -EOVERFLOW;
@@ -1459,15 +1465,21 @@ int ovs_nla_copy_actions(const struct nlattr *attr,
 
 
 		case OVS_ACTION_ATTR_POP_ETH:
+			if (noeth)
+				return -EINVAL;
+			noeth = true;
 			break;
 
 		case OVS_ACTION_ATTR_PUSH_ETH:
+			noeth = false;
 			break;
 
 		case OVS_ACTION_ATTR_POP_VLAN:
 			break;
 
 		case OVS_ACTION_ATTR_PUSH_VLAN:
+			if (noeth)
+				return -EINVAL;
 			vlan = nla_data(a);
 			if (vlan->vlan_tpid != htons(ETH_P_8021Q))
 				return -EINVAL;
@@ -1476,7 +1488,7 @@ int ovs_nla_copy_actions(const struct nlattr *attr,
 			break;
 
 		case OVS_ACTION_ATTR_SET:
-			err = validate_set(a, key, sfa, &skip_copy);
+			err = validate_set(a, key, sfa, &skip_copy, noeth);
 			if (err)
 				return err;
 			break;
